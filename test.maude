@@ -1,0 +1,17 @@
+in debug.maude
+in full-maude.maude
+in specs/nspk.maude
+in parallel-meta-search.maude
+in init.maude
+
+mod TESTER is
+    pr PARALLEL-META-SEARCH .
+    ops init goal : -> Term .
+    eq init = '`{_`}['__['nw:_['emp.Soup`{Msg`}],'rand:_['__['r1.Rand,'r2.Rand]],'nonces:_['emp.Soup`{Nonce`}],'prins:_['__['p.Prin,'q.Prin,'intrdr.Prin]]]] .
+    eq goal = '`{_`}['__['OCs:Soup`{OCom`},'nw:_['__['NW:Soup`{Msg`},'m1['P:Prin,'P:Prin,'Q:Prin,'c1['Q:Prin,'n['P:Prin,'Q:Prin,'R:Rand],'P:Prin]],'m2['Q':Prin,'Q:Prin,'P:Prin,'c2['P:Prin,'n['P:Prin,'Q:Prin,'R:Rand],'N:Nonce]]]]]] .
+    op cond : -> Condition .
+    eq cond = 'not_['_\in_['m2['Q:Prin,'Q:Prin,'P:Prin,'c2['P:Prin,'n['P:Prin,'Q:Prin,'R:Rand],'N:Nonce]],'__['NW:Soup`{Msg`},'m2['Q':Prin,'Q:Prin,'P:Prin,'c2['P:Prin,'n['P:Prin,'Q:Prin,'R:Rand],'N:Nonce]]]]] = 'true.Bool /\ '_=/=_['P:Prin,'intrdr.Prin] = 'true.Bool .
+endm
+
+--- erew <> p-metaSearch(upModule('TAS, true), upTerm(init), upTerm({(pc[p1]: cs) (pc[p2]: cs) (OCs:Soup{OComp})}), nil, '+, 3, 2) .
+erew <> p-metaSearch(upModule('NSPK, true), init, goal, cond, '+, 3, 2) .

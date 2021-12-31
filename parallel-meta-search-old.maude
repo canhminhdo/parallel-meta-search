@@ -1,0 +1,441 @@
+in file.maude
+in metaInterpreter.maude
+in utils.maude
+
+fmod IQUEUE{X :: TRIV} is
+    protecting BOOL .
+    pr NAT .
+
+    sort Queue{X} .
+    subsort X$Elt < Queue{X} .
+    op emptyq : -> Queue{X} [ctor] .
+    op _|_ : Queue{X} Queue{X} -> Queue{X} [ctor assoc id: emptyq] .
+    op isEmpty : Queue{X} -> Bool .
+    op qsize : Queue{X} -> Nat .
+    var Q : Queue{X} .
+    var E : X$Elt .
+
+    eq qsize(emptyq) = 0 .
+    eq qsize(E | Q) = qsize(Q) + 1 .
+
+    eq isEmpty(emptyq) = true .
+    eq isEmpty(E | Q) = false .
+endfm
+
+view Worker from TRIV to CONFIGURATION is
+    sort Elt to Oid .
+endv
+
+mod PARALLEL-FUNC is
+    pr META-LEVEL .
+    pr TERMSET-EXT .
+
+    sorts ResultState MatchState .
+    op pM : -> Module [ctor] .
+    op errorResultState : -> ResultState .
+    op <_,_,_> : Bool TermSet TermSet -> ResultState .
+    op <_,_,_> : Bool Term TermSet -> ResultState .
+    op <_,_,_> : Bool TermSet Term -> ResultState .
+    op <_,_,_> : Bool Term Term -> ResultState .
+    op <_,_,_,_,_,_,_,_> : Nat TermSet Term Condition Qid Nat TermSet Type -> ResultState .
+    op <_,_> : Bool TermSet -> MatchState .
+
+    vars M : Module .
+    vars N N' Step : Nat .
+    vars NzStep : NzNat .
+    vars T T' T'' : Term .
+    vars TS TS' TS'' TS''' History History' : TermSet .
+    vars Q : Qid .
+    vars Type : Type .
+    vars C : Condition .
+    vars RT : ResultTriple .
+    vars B : Bool .
+    vars Sub? : Substitution? .
+
+    op dec : Bound Nat -> Bound .
+    eq dec(unbounded, N) = unbounded .
+    eq dec(s(N), s(N')) = dec(N, N') .
+    eq dec(0, N) = 0 .
+    eq dec(N, 0) = N .
+
+    op searchStates : Nat TermSet Term Condition Qid Nat Type -> ResultState .
+    eq searchStates(N, TS, T', C, Q, NzStep, Type)
+    = searchStates*(pM, TS, T', C, Q, sd(NzStep, 1), Type, TS, emptyTermSet) [print "Handled by pid = " N] .
+
+    op searchStates* : Module TermSet Term Condition Qid Nat Type TermSet TermSet -> ResultState .
+    eq searchStates*(M, emptyTermSet, T', C, Q, Step, Type, History, TS')
+    =   if Step == 0 or-else TS' == emptyTermSet then
+            < false, TS', History >
+        else
+            searchStates*(M, TS', T', C, Q, sd(Step,1), Type, History | TS', emptyTermSet)
+        fi .
+
+    ceq searchStates*(M, T | TS, T', C, Q, Step, Type, History, TS')
+    =   if B == true then
+            < true, TS''', TS'' >
+        else
+            searchStates*(M, TS, T', C, Q, Step, Type, History, TS' | TS'')
+        fi
+    if TS'' := filterStates(getSuccessors(M, T, getVarTerm(Type)), History)
+    /\ < B, TS''' > := matchingStates(M, T', TS'', C) .
+
+    *** check matching states
+    op matchingStates : Module Term TermSet Condition -> MatchState .
+    eq matchingStates(M, T', emptyTermSet, C) = < false, emptyTermSet > .
+    eq matchingStates(M, T', T | TS, C) =  if metaMatch(M, T', T, C, 0) == noMatch then
+                                                matchingStates(M, T', TS, C)
+                                            else
+                                                < true, T >
+                                            fi .
+
+    *** filter states with history
+    op filterStates : TermSet TermSet -> TermSet .
+    eq filterStates(emptyTermSet, History) = emptyTermSet .
+    eq filterStates(T | TS, History) =  if T in History then
+                                            filterStates(TS, History)
+                                        else
+                                            T | filterStates(TS, History)
+                                        fi .
+
+    *** get all sucessors states from a state.
+    op getVarTerm : Type -> Term .
+    eq getVarTerm(Type) = qid("VAR-" + string(Type) + ":" + string(Type)) .
+
+    op getSuccessors : Module Term Term -> TermSet .
+    eq getSuccessors(M, T, T') = getSuccessors*(
+        metaSearch(M, T, T', nil, '+, 1, 0),
+        M,
+        T,
+        T',
+        0
+    ) .
+
+    op getSuccessors* : ResultTriple? Module Term Term Nat -> TermSet .
+    eq getSuccessors*(failure, M, T, T', N) = emptyTermSet .
+    eq getSuccessors*(RT, M, T, T', N) = getTerm(RT) | getSuccessors*(
+        metaSearch(M, T, T', nil, '+, 1, N + 1),
+        M,
+        T,
+        T',
+        N + 1
+    ) .
+endm
+
+mod PARALLEL-CONFIG is
+    pr META-INTERPRETER .
+    pr PARALLEL-FUNC .
+    pr IQUEUE{Worker} .
+
+    sort Status .
+    ops idle initializing initialized waiting suspending working stopping terminated : -> Status .
+    op status :_ : Status -> Attribute [ctor format(m o o o)] .
+    op m :_ : Module -> Attribute .
+    op init :_ : Term -> Attribute .
+    op initType :_ : Type -> Attribute .
+    op goal :_ : Term -> Attribute .
+    op cond :_ : Condition -> Attribute .
+    op type :_ : Qid -> Attribute .
+    op bound :_ : Bound -> Attribute .
+    op depth :_ : Nat -> Attribute .
+    op step :_ : Bound -> Attribute .
+    op #workers :_ : Nat -> Attribute [ctor format(! o o o)] .
+    op history :_ : TermSet -> Attribute .
+    op jobs :_ : TermSet -> Attribute .
+    op next :_ : TermSet -> Attribute .
+    op result :_ : TermSet -> Attribute .
+    op workers :_ : Queue{Worker} -> Attribute [ctor format(! o o o)] .
+    op stopWorking : Oid Oid -> Msg [ctor msg format (b o)] .
+
+    op Manager : -> Cid [ctor] .
+    op aManager : -> Oid [ctor] .
+endm
+
+mod PARALLEL-GENERIC-TOOLS is
+    pr STD-STREAM .
+    pr PARALLEL-CONFIG .
+    pr FM-MODULE-HANDLING .
+
+    vars O O' MI : Oid .
+    vars A : AttributeSet .
+    vars M M' M'' : Module .
+    vars T T' T'' : Term .
+    vars C : Condition .
+    vars B : Bound .
+    vars N N' N'' D D' Step Pid : Nat .
+    vars Q : Qid .
+    vars RP : ResultPair .
+    vars W : Queue{Worker} .
+    vars Type RType : Type .
+    vars TS TS' History History' RTS : TermSet .
+    vars RB : Bool .
+    vars RS : ResultState .
+
+    *** 1st: Module, 2nd: Term, 3rd: Term, 4th: Condition, 5th: Type, 6th: Bound, 7th: step, 7th: #workers
+    op p-metaSearch : Module Term Term Condition Qid Bound Nat Nat -> Configuration .
+    ceq p-metaSearch(M, T, T', C, Q, B, Step, N)
+    = < aManager : Manager |
+        status : idle,
+        m : M,
+        init : getTerm(RP),
+        initType : getType(RP),
+        goal : T',
+        cond : C,
+        type : Q,
+        bound : B,
+        depth : 0,
+        step : Step,
+        #workers : N >
+    if RP := metaReduce(M, T)  [print RP] .
+
+    eq p-metaSearch(M, T, T', C, Q, B, Step, N) = none write(stdout, aManager, "Cannot reduce the init term") [owise] .
+
+    rl [CreateWorkers] : < O : Manager |
+        status : idle,
+        init : T,
+        #workers : N,
+        A >
+    => < O : Manager |
+        status : initializing,
+        init : T,
+        #workers : N,
+        workers : emptyq,
+        jobs : T,
+        history : emptyTermSet,
+        next : emptyTermSet,
+        result : emptyTermSet,
+        A >
+        produceInterpreter(O, N)
+        [print "[CreateWorkers]"] .
+
+    op produceInterpreter : Oid Nat -> Configuration .
+    ceq produceInterpreter(O, N) = createInterpreter(interpreterManager, O, newProcess)
+        produceInterpreter(O, sd(N, 1)) if N > 0 .
+    eq produceInterpreter(O, N) = none [owise] .
+
+    crl [CreatedWorker] : < O : Manager |
+        status : initializing,
+        #workers : N,
+        workers : emptyq,
+        m : M,
+        A >
+        createdInterpreter(O, O', MI)
+    => < O : Manager |
+        status : initializing,
+        #workers : N,
+        workers : emptyq,
+        m : M,
+        A >
+        insertModule(MI, O, M'')
+        if M' := upModule('PARALLEL-FUNC, true)
+        /\ M'' := addEqs(
+            (eq 'pM.Module = upTerm(M) [none] . )
+            , M'
+        )
+        [print "[CreatedWorker]"] .
+
+    rl [InsertedModule] : < O : Manager |
+        status : initializing,
+        workers : W,
+        A >
+        insertedModule(O, MI)
+    => < O : Manager |
+        status : initializing,
+        workers : (W | MI),
+        A >
+        [print "[InsertedModule] " MI] .
+
+    crl [CreatedWorkersDone] : < O : Manager |
+        status : initializing,
+        #workers : N,
+        workers : W,
+        A >
+    => < O : Manager |
+        status : working,
+        #workers : N,
+        workers : W,
+        A >
+    if qsize(W) == N
+    [print "[CreatedWorkersDone]"] .
+
+    crl [AssignJob] : < O : Manager |
+        status : working,
+        jobs : (T | TS),
+        workers : (MI | W),
+        m : M,
+        goal : T',
+        cond : C,
+        type : Q,
+        initType : Type,
+        history : History,
+        step : Step,
+        bound : B,
+        A >
+    => < O : Manager |
+        status : working,
+        jobs : TS,
+        workers : W,
+        m : M,
+        goal : T',
+        cond : C,
+        type : Q,
+        initType : Type,
+        history : History,
+        step : Step,
+        bound : B,
+        A >
+        reduceTerm(MI, O, 'PARALLEL-FUNC-ADDEDEQS, T'')
+    if Pid := extractOid(MI)
+    /\ T'' := 'searchStates[
+        upTerm(Pid),
+        upTerm(T),
+        upTerm(T'),
+        upTerm(C),
+        upTerm(Q),
+        upTerm(Step),
+        upTerm(Type)
+        ]
+        [print "[AssignJob] " MI]
+        .
+
+    op extractOid : Oid -> Nat .
+    eq extractOid(interpreter(N)) = N .
+
+    crl [WorkerResult] : < O : Manager |
+        status : working,
+        workers : W,
+        next : TS,
+        history : History,
+        result : RTS,
+        A >
+        reducedTerm(O, MI, N, T, RType)
+    =>  if RB then
+            < O : Manager |
+                status : stopping,
+                workers : (W | MI),
+                next : TS,
+                history : History,
+                result : (RTS | TS'),
+                A >
+            stopWorking(O, O)
+        else
+            < O : Manager |
+                status : working,
+                workers : (W | MI),
+                next : (TS | TS'),
+                history : (History | History'),
+                result : RTS,
+            A >
+        fi
+    if RType == 'ResultState
+    /\ < RB, TS', History' > := downTerm(T, errorResultState)
+    --- /\ D := size(TS')
+    --- /\ D' := size(History')
+    --- [print "[WorkerResult] MI = " MI " isMatch = " RB " #TS = " D " #History = " D']
+    [print "[WorkerResult] MI = " MI " isMatch = " RB]
+    .
+
+    crl [Switch] : < O : Manager |
+        status : working,
+        #workers : N,
+        workers : W,
+        jobs : emptyTermSet,
+        history : History,
+        next : TS,
+        step : Step,
+        bound : B,
+        depth : D,
+        A >
+    => < O : Manager |
+        status : suspending,
+        #workers : N,
+        workers : W,
+        jobs : TS',
+        history : History,
+        next : emptyTermSet,
+        step : Step,
+        bound : dec(B,Step),
+        depth : D',
+        A >
+    if qsize(W) == N
+    /\ TS =/= emptyTermSet
+    /\ TS' := filterStates(TS, History)
+    /\ D' := (D + Step)
+    /\ N' := size(TS')
+    --- /\ N'' := size(History)
+    --- [print "<================= [Switch at Depth " D' " #jobs = " N' " #History = " N'' "] =================>"]
+    [print "<================= [Switch at Depth " D' " #jobs = " N' "] =================>"]
+    .
+
+    rl [Resuming] : < O : Manager |
+        status : suspending,
+        jobs : TS,
+        bound : B,
+        A >
+    => if B == 0 or-else TS == emptyTermSet then
+        --- Stop the search
+        < O : Manager |
+            status : stopping,
+            jobs : TS,
+            bound : B,
+            A >
+        stopWorking(O, O)
+    else
+        < O : Manager |
+            status : working,
+            jobs : TS,
+            bound : B,
+            A >
+    fi [print "Resuming"] .
+
+    crl [terminate] : < O : Manager |
+        status : working,
+        #workers : N,
+        workers : W,
+        jobs : emptyTermSet,
+        next : emptyTermSet,
+        A >
+    => < O : Manager |
+        status : stopping,
+        #workers : N,
+        workers : W,
+        jobs : emptyTermSet,
+        next : emptyTermSet,
+        A >
+        stopWorking(O, O)
+    if qsize(W) == N
+    [print "[terminate]"] .
+
+    --- Stop working from here
+    rl [StopWorkers] : < O : Manager |
+        workers : W,
+        A >
+        stopWorking(O, O')
+    => < O : Manager |
+        workers : W,
+        A >
+        produceQuitMsg(O, W)
+        [print "[StopWorkers]"] .
+
+    op produceQuitMsg : Oid Queue{Worker} -> Configuration .
+    eq produceQuitMsg(O, (MI | W)) = quit(MI, O) produceQuitMsg(O, W) .
+    eq produceQuitMsg(O, emptyq) = none .
+
+    rl [Bye] : < O : Manager |
+        workers : (MI | W),
+        A >
+        bye(O, MI)
+    => < O : Manager |
+        workers : W,
+        A >
+        [print "[Bye]"] .
+
+    crl [CleanUp] : < O : Manager |
+        status : stopping,
+        workers : emptyq,
+        result : RTS,
+        history : History,
+        A >
+    => < O : Manager | result : RTS >
+    if N := size(History)
+        [print "[CleanUp] #states = " N] .
+endm

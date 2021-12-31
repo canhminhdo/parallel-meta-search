@@ -1,0 +1,426 @@
+in file.maude
+in metaInterpreter.maude
+in utils.maude
+
+fmod IQUEUE{X :: TRIV} is
+    protecting BOOL .
+    pr NAT .
+
+    sort Queue{X} .
+    subsort X$Elt < Queue{X} .
+    op emptyq : -> Queue{X} [ctor] .
+    op _|_ : Queue{X} Queue{X} -> Queue{X} [ctor assoc id: emptyq] .
+    op isEmpty : Queue{X} -> Bool .
+    op qsize : Queue{X} -> Nat .
+    var Q : Queue{X} .
+    var E : X$Elt .
+
+    eq qsize(emptyq) = 0 .
+    eq qsize(E | Q) = qsize(Q) + 1 .
+
+    eq isEmpty(emptyq) = true .
+    eq isEmpty(E | Q) = false .
+endfm
+
+view Worker from TRIV to CONFIGURATION is
+    sort Elt to Oid .
+endv
+
+mod PARALLEL-FUNC is
+    pr META-LEVEL .
+    pr TERMSET-EXT .
+
+    op pM : -> Module [ctor] .
+
+    vars M : Module .
+    vars N D : Nat .
+    vars T T' : Term .
+    vars Q : Qid .
+    vars Type : Type .
+    vars C : Condition .
+    vars B : Bound .
+    vars Sub? : Substitution? .
+    vars History TS1 TS2 TS TS' : TermSet .
+    vars RT : ResultTriple .
+
+    *** get a variable term for condition
+    op getVarTerm : Type -> Term .
+    eq getVarTerm(Type) = qid("VAR-" + string(Type) + ":" + string(Type)) .
+
+    *** generate states up to a depth
+    op genStates : Term Type Nat -> TermSet .
+    ceq genStates(T, Type, D) = if D == 0 then T else genStates*(T, T', D, T, emptyTermSet) fi
+    if T' := getVarTerm(Type) .
+
+    op genStates* : TermSet Term Nat TermSet TermSet -> TermSet .
+    ceq genStates*(T | TS1, T', D, History, TS2)
+    = genStates*(TS1, T', D, History, TS2 | TS)
+    if TS := getSuccessors(pM, T, T') .
+
+    ceq genStates*(emptyTermSet, T', D, History, TS)
+    = if D > 1 then
+        genStates*(TS', T', sd(D, 1), (History | TS') , emptyTermSet)
+    else
+        TS'
+    fi
+    if TS' := filterStates(TS, History) .
+
+    *** filter states with history
+    op filterStates : TermSet TermSet -> TermSet .
+    eq filterStates(emptyTermSet, History) = emptyTermSet .
+    eq filterStates(T | TS, History) =  if T in History then
+                                            filterStates(TS, History)
+                                        else
+                                            T | filterStates(TS, History)
+                                        fi .
+
+    *** generate all successor states from a state
+    op getSuccessors : Module Term Term -> TermSet .
+    eq getSuccessors(M, T, T') = getSuccessors*(
+        metaSearch(M, T, T', nil, '+, 1, 0),
+        M,
+        T,
+        T',
+        0
+    ) .
+
+    op getSuccessors* : ResultTriple? Module Term Term Nat -> TermSet .
+    eq getSuccessors*(failure, M, T, T', N) = emptyTermSet .
+    eq getSuccessors*(RT, M, T, T', N) = getTerm(RT) | getSuccessors*(
+        metaSearch(M, T, T', nil, '+, 1, N + 1),
+        M,
+        T,
+        T',
+        N + 1
+    ) .
+
+    *** get counterexample up to a depth if have any
+    op findCounterexample : Term Term Condition Qid Bound -> ResultTriple? .
+    eq findCounterexample(T, T', C, Q, B) = metaSearch(pM, T, T', C, Q, B, 0) .
+endm
+
+mod PARALLEL-CONFIG is
+    pr META-INTERPRETER .
+    pr PARALLEL-FUNC .
+    pr IQUEUE{Worker} .
+
+    sort Status .
+    ops idle initializing working stopping checking generating : -> Status .
+    op status :_ : Status -> Attribute [ctor format(m o o o)] .
+    op m :_ : Module -> Attribute .
+    op initState :_ : Term -> Attribute .
+    op initType :_ : Type -> Attribute .
+    op goal :_ : Term -> Attribute .
+    op cond :_ : Condition -> Attribute .
+    op type :_ : Qid -> Attribute .
+    op bound :_ : Nat -> Attribute .
+    op #workers :_ : Nat -> Attribute [ctor format(! o o o)] .
+    op jobs :_ : TermSet -> Attribute .
+    op #jobs :_ : Nat -> Attribute .
+    op count :_ : Nat -> Attribute .
+    op result :_ : TermSet -> Attribute .
+    op workers :_ : Queue{Worker} -> Attribute [ctor format(! o o o)] .
+    op stopWorking : Oid Oid -> Msg [ctor msg format (b o)] .
+    op miCheck :_ : Oid -> Attribute .
+
+    op Manager : -> Cid [ctor] .
+    op aManager : -> Oid [ctor] .
+endm
+
+mod PARALLEL-GENERIC-TOOLS is
+    pr STD-STREAM .
+    pr PARALLEL-CONFIG .
+    pr FM-MODULE-HANDLING .
+
+    vars O O' MI MI' : Oid .
+    vars A : AttributeSet .
+    vars M M' M'' : Module .
+    vars T T' T'' : Term .
+    vars C : Condition .
+    vars B : Bound .
+    vars N N' D N1 N2 N1' N2' : Nat .
+    vars Q : Qid .
+    vars RP : ResultPair .
+    vars W : Queue{Worker} .
+    vars Type RType : Type .
+    vars TS TS' : TermSet .
+    vars ST : Status .
+    vars RT? : ResultTriple? .
+    vars BL : Bool .
+
+    *** 1st: Module, 2nd: init Term, 3rd: goal Term, 4th: Condition, 5th: Type Search, 6th: Bound, 7th: #workers
+    op p-metaSearch : Module Term Term Condition Qid Nat Nat -> Configuration .
+    ceq p-metaSearch(M, T, T', C, Q, D, N)
+    = < aManager : Manager |
+        status : idle,
+        m : M,
+        initState : getTerm(RP),
+        initType : getType(RP),
+        goal : T',
+        cond : C,
+        type : Q,
+        bound : D,
+        #workers : N >
+    if RP := metaReduce(M, T) .
+
+    eq p-metaSearch(M, T, T', C, Q, D, N) = none write(stdout, aManager, "Cannot reduce the init term") [owise] .
+
+    rl [CreateWorkers] : < O : Manager |
+        status : idle,
+        initState : T,
+        #workers : N,
+        A >
+    => < O : Manager |
+        status : initializing,
+        initState : T,
+        #workers : N,
+        workers : emptyq,
+        jobs : emptyTermSet,
+        result : emptyTermSet,
+        A >
+        produceInterpreter(O, N)
+        [print "[CreateWorkers]"] .
+
+    op produceInterpreter : Oid Nat -> Configuration .
+    ceq produceInterpreter(O, N) = createInterpreter(interpreterManager, O, newProcess)
+        produceInterpreter(O, sd(N, 1)) if N > 0 .
+    eq produceInterpreter(O, N) = none [owise] .
+
+    crl [CreatedWorker] : < O : Manager |
+        status : initializing,
+        #workers : N,
+        workers : emptyq,
+        m : M,
+        A >
+        createdInterpreter(O, O', MI)
+    => < O : Manager |
+        status : initializing,
+        #workers : N,
+        workers : emptyq,
+        m : M,
+        A >
+        insertModule(MI, O, M'')
+        if M' := upModule('PARALLEL-FUNC, true)
+        /\ M'' := addEqs(
+            (eq 'pM.Module = upTerm(M) [none] . )
+            , M'
+        )
+        [print "[CreatedWorker]"] .
+
+    rl [InsertedModule] : < O : Manager |
+        status : initializing,
+        workers : W,
+        A >
+        insertedModule(O, MI)
+    => < O : Manager |
+        status : initializing,
+        workers : (W | MI),
+        A >
+        [print "[InsertedModule] " MI] .
+
+    crl [CreatedWorkersDone] : < O : Manager |
+        status : initializing,
+        #workers : N,
+        workers : W,
+        A >
+    => < O : Manager |
+        status : checking,
+        #workers : N,
+        workers : W,
+        A >
+    if qsize(W) == N
+    [print "[CreatedWorkersDone]"] .
+
+    crl [Checking] : < O : Manager |
+        status : checking,
+        workers : (MI | W),
+        initState : T,
+        goal : T',
+        cond : C,
+        type : Q,
+        bound : D,
+        A >
+    => < O : Manager |
+        status : generating,
+        workers : W,
+        initState : T,
+        goal : T',
+        cond : C,
+        type : Q,
+        bound : D,
+        miCheck : MI,
+        A >
+        reduceTerm(MI, O, 'PARALLEL-FUNC-ADDEDEQS, T'')
+    if T'' := 'findCounterexample[upTerm(T), upTerm(T'), upTerm(C), upTerm(Q), upTerm(D)]
+    [print "[Checking] " MI]
+    .
+
+    crl [GenStates] : < O : Manager |
+        status : generating,
+        workers : (MI | W),
+        initState : T,
+        goal : T',
+        cond : C,
+        type : Q,
+        bound : D,
+        initType : Type,
+        A >
+    => < O : Manager |
+        status : working,
+        workers : W,
+        initState : T,
+        goal : T',
+        cond : C,
+        type : Q,
+        bound : D,
+        initType : Type,
+        A >
+        reduceTerm(MI, O, 'PARALLEL-FUNC-ADDEDEQS, T'')
+    if T'' := 'genStates[upTerm(T), upTerm(Type), upTerm(D)]
+    [print "[GenStates] " MI]
+    .
+
+    crl [WorkerResultFirst] : < O : Manager |
+        status : ST,
+        workers : W,
+        miCheck : MI,
+        A >
+        reducedTerm(O, MI, N, T, RType)
+    =>  if RType == 'ResultTriple then
+            < O : Manager |
+                status : stopping,
+                workers : (W | MI),
+                result : getTerm(RT?),
+                A >
+            stopWorking(O, O)
+        else
+            < O : Manager |
+                status : ST,
+                workers : (W | MI),
+            A >
+        fi
+    if (RType == 'ResultTriple or-else RType == 'ResultTriple?)
+    /\ RT? := downTerm(T, failure)
+    [print "[WorkerResultFirst] " MI]
+    .
+
+    crl [WorkerResult] : < O : Manager |
+        status : ST,
+        workers : W,
+        #jobs : N1,
+        count : N2,
+        A >
+        reducedTerm(O, MI, N, T, RType)
+    =>  if RType == 'ResultTriple then
+            < O : Manager |
+                status : stopping,
+                workers : (W | MI),
+                result : getTerm(RT?),
+                #jobs : N1,
+                count : N2',
+                A >
+            stopWorking(O, O)
+        else
+            < O : Manager |
+                status : ST,
+                workers : (W | MI),
+                #jobs : N1,
+                count : N2',
+            A >
+        fi
+    if (RType == 'ResultTriple or-else RType == 'ResultTriple?)
+    /\ RT? := downTerm(T, failure)
+    /\ N2' := N2 + 1
+    [print "[WorkerResult] " MI ", progress = " N2' "/" N1]
+    .
+
+    crl [WorkerGenResult] :
+        < O : Manager |
+            status : ST,
+            workers : W,
+            jobs : emptyTermSet,
+            A >
+        reducedTerm(O, MI, N, T', RType)
+    =>  < O : Manager |
+            status : ST,
+            workers : (W | MI),
+            jobs : TS,
+            #jobs : N',
+            count : 0,
+            A >
+    if (RType =/= 'ResultTriple and-then RType =/= 'ResultTriple?)
+    /\ TS := downTerm(T', emptyTermSet)
+    /\ N' := size(TS)
+    [print "[WorkerGenResult] " MI ", #jobs = " N']
+    .
+
+    crl [AssignJob] : < O : Manager |
+        status : working,
+        jobs : (T | TS),
+        workers : (MI | W),
+        goal : T',
+        cond : C,
+        type : Q,
+        A >
+    => < O : Manager |
+        status : working,
+        jobs : TS,
+        workers : W,
+        goal : T',
+        cond : C,
+        type : Q,
+        A >
+        reduceTerm(MI, O, 'PARALLEL-FUNC-ADDEDEQS, T'')
+    if T'' := 'findCounterexample[upTerm(T), upTerm(T'), upTerm(C), upTerm(Q), upTerm(unbounded)]
+    [print "[AssignJob] " MI]
+    .
+
+    crl [Terminate] : < O : Manager |
+        status : working,
+        #workers : N,
+        workers : W,
+        jobs : emptyTermSet,
+        A >
+    => < O : Manager |
+        status : stopping,
+        #workers : N,
+        workers : W,
+        jobs : emptyTermSet,
+        A >
+        stopWorking(O, O)
+    if qsize(W) == N
+    [print "[Terminate]"] .
+
+    --- Stop working from here
+    rl [StopWorkers] : < O : Manager |
+        workers : W,
+        A >
+        stopWorking(O, O')
+    => < O : Manager |
+        workers : W,
+        A >
+        produceQuitMsg(O, W)
+        [print "[StopWorkers]"] .
+
+    op produceQuitMsg : Oid Queue{Worker} -> Configuration .
+    eq produceQuitMsg(O, (MI | W)) = quit(MI, O) produceQuitMsg(O, W) .
+    eq produceQuitMsg(O, emptyq) = none .
+
+    rl [Bye] : < O : Manager |
+        workers : (MI | W),
+        A >
+        bye(O, MI)
+    => < O : Manager |
+        workers : W,
+        A >
+        [print "[Bye]"] .
+
+    rl [CleanUp] : < O : Manager |
+        status : stopping,
+        workers : emptyq,
+        result : TS,
+        A >
+    =>  < O : Manager |
+        result : TS >
+    [print "[CleanUp]"] .
+endm
